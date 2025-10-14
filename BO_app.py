@@ -1,5 +1,5 @@
 # ============================================================
-# STREAMLIT BACK ORDER MANAGEMENT APP
+# STREAMLIT BACK ORDER MANAGEMENT APP - OPTIMIZED
 # Save this as: app.py
 # Run with: streamlit run app.py
 # ============================================================
@@ -9,15 +9,47 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import io
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# Set page config
+# ============================================================
+# PAGE CONFIG - MUST BE FIRST
+# ============================================================
+
 st.set_page_config(
     page_title="Back Order Management",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom styling
+# ============================================================
+# CACHING FOR PERFORMANCE
+# ============================================================
+
+@st.cache_data
+def load_and_clean_data(df):
+    """Cache data cleaning operations"""
+    df = df.copy()
+    df['QOH'] = pd.to_numeric(df['QOH'], errors='coerce')
+    df['Outstanding Amount'] = pd.to_numeric(df['Outstanding Amount'], errors='coerce')
+    
+    # Clean customer names
+    df['Sell-to Customer Name'] = df['Sell-to Customer Name'].astype(str).str.strip()
+    df = df[df['Sell-to Customer Name'] != '']
+    df = df[df['Sell-to Customer Name'] != 'nan']
+    df = df[df['Sell-to Customer Name'] != 'NaN']
+    df = df[~df['Sell-to Customer Name'].str.isdigit()]
+    
+    # Remove rows with missing critical data
+    df_clean = df.dropna(subset=['QOH', 'Sell-to Customer Name', 
+                                   'Outstanding Amount', 'Mfg. Lead Name'])
+    
+    return df_clean
+
+# ============================================================
+# CUSTOM STYLING
+# ============================================================
+
 st.markdown("""
     <style>
     .header-title {
@@ -56,8 +88,8 @@ st.markdown("""
 if 'df' not in st.session_state:
     st.session_state.df = None
 
-if 'order_reasons_dict' not in st.session_state:
-    st.session_state.order_reasons_dict = {}
+if 'order_data_dict' not in st.session_state:
+    st.session_state.order_data_dict = {}
 
 # ============================================================
 # HEADER
@@ -103,7 +135,8 @@ with st.sidebar:
         - Organizing orders by customer
         - Showing stock status (in-stock vs back order)
         - Tracking dollar values
-        - Recording reasons for delays per order
+        - Recording reasons and comments per order
+        - Exporting all data to Excel
         """
     )
 
@@ -116,27 +149,14 @@ if st.session_state.df is not None:
     
     try:
         # ============================================================
-        # DATA PREPARATION
+        # DATA PREPARATION - CACHED
         # ============================================================
         
-        # Convert to numeric
-        df['QOH'] = pd.to_numeric(df['QOH'], errors='coerce')
-        df['Outstanding Amount'] = pd.to_numeric(df['Outstanding Amount'], errors='coerce')
-        
-        # Clean customer names - remove invalid ones
-        df['Sell-to Customer Name'] = df['Sell-to Customer Name'].astype(str).str.strip()
-        df = df[df['Sell-to Customer Name'] != '']
-        df = df[df['Sell-to Customer Name'] != 'nan']
-        df = df[df['Sell-to Customer Name'] != 'NaN']
-        df = df[~df['Sell-to Customer Name'].str.isdigit()]
-        
-        # Remove rows with missing critical data
-        df_clean = df.dropna(subset=['QOH', 'Sell-to Customer Name', 
-                                      'Outstanding Amount', 'Mfg. Lead Name'])
+        df_clean = load_and_clean_data(df)
         
         # Separate back orders and in-stock
-        backorders = df_clean[df_clean['QOH'] == 0].copy()
-        instock = df_clean[df_clean['QOH'] > 0].copy()
+        backorders = df_clean[df_clean['QOH'] == 0]
+        instock = df_clean[df_clean['QOH'] > 0]
         
         # ============================================================
         # SUMMARY METRICS
@@ -230,9 +250,9 @@ if st.session_state.df is not None:
         ]
         
         if stock_filter == "Back Order Only":
-            filtered_df = filtered_df[filtered_df['QOH'] == 0]
+            filtered_df = filtered_df[filtered_df['QOH'] == 0].copy()
         elif stock_filter == "In Stock Only":
-            filtered_df = filtered_df[filtered_df['QOH'] > 0]
+            filtered_df = filtered_df[filtered_df['QOH'] > 0].copy()
         
         st.markdown("---")
         
@@ -408,11 +428,11 @@ if st.session_state.df is not None:
                     st.divider()
                     
                     # ============================================================
-                    # REASON FOR NOT SHIPPING - PER SALES ORDER
+                    # REASON & COMMENTS - PER SALES ORDER
                     # ============================================================
                     
-                    st.write("**📝 Reason for Not Shipping - Per Sales Order**")
-                    st.write("*Add reason for each individual sales order*")
+                    st.write("**📝 Reason for Not Shipping & Comments - Per Sales Order**")
+                    st.write("*Add reason and any comments for each individual sales order*")
                     
                     # Predefined reasons
                     predefined_reasons = [
@@ -438,46 +458,49 @@ if st.session_state.df is not None:
                         st.write(f"**Order {idx+1}:** {order['Sales Order No']} - Item: {order['Item No']}")
                         st.write(f"Description: {order['Desc'][:60]} | Amount: ${order['Outstanding Amount']:,.2f} | Status: {stock_status}")
                         
-                        col1, col2 = st.columns([2, 1])
-                        
-                        with col1:
-                            selected_reason = st.selectbox(
-                                "Reason:",
-                                predefined_reasons,
-                                key=f"order_reason_{order_key}_{id(customer_df)}"
-                            )
-                        
-                        with col2:
-                            st.write("")
+                        # Reason dropdown
+                        selected_reason = st.selectbox(
+                            "Select Reason:",
+                            predefined_reasons,
+                            key=f"order_reason_{order_key}_{id(customer_df)}"
+                        )
                         
                         # Custom reason if "Other" selected
                         if selected_reason == "Other":
-                            custom_reason = st.text_area(
+                            final_reason = st.text_input(
                                 "Specify reason:",
-                                key=f"order_custom_{order_key}_{id(customer_df)}",
-                                height=60,
+                                key=f"order_custom_reason_{order_key}_{id(customer_df)}",
                                 placeholder="Enter specific reason..."
                             )
-                            final_reason = custom_reason if custom_reason.strip() else "Other (not specified)"
                         else:
                             final_reason = selected_reason
                         
-                        # Save reason for this specific order
+                        # Comments section - BELOW each order
+                        st.write("**📌 Add Comments:**")
+                        user_comments = st.text_area(
+                            "Any additional comments or notes:",
+                            key=f"order_comments_{order_key}_{id(customer_df)}",
+                            height=100,
+                            placeholder="Enter any comments, notes, or updates about this order..."
+                        )
+                        
+                        # Save button
                         if st.button(
                             f"💾 Save for {order['Sales Order No']}",
                             key=f"save_order_{order_key}_{id(customer_df)}"
                         ):
-                            st.session_state.order_reasons_dict[order_key] = {
+                            st.session_state.order_data_dict[order_key] = {
                                 'sales_order': order['Sales Order No'],
                                 'item_no': order['Item No'],
                                 'description': order['Desc'],
-                                'reason': final_reason,
+                                'reason': final_reason if final_reason else "Not specified",
+                                'comments': user_comments,
                                 'timestamp': datetime.now(),
                                 'customer': customer_name,
                                 'amount': order['Outstanding Amount'],
                                 'stock_status': stock_status
                             }
-                            st.success(f"✅ Reason saved for {order['Sales Order No']}")
+                            st.success(f"✅ Data saved for {order['Sales Order No']}")
                         
                         st.divider()
         else:
@@ -557,41 +580,106 @@ if st.session_state.df is not None:
                 st.info("No data to export")
         
         with col3:
-            # Export reasons
-            if st.session_state.order_reasons_dict:
-                reasons_data = []
-                for order_key, data in st.session_state.order_reasons_dict.items():
-                    reasons_data.append({
-                        'Customer': data['customer'],
-                        'Sales Order': data['sales_order'],
-                        'Item No': data['item_no'],
-                        'Description': data['description'],
-                        'Reason': data['reason'],
-                        'Amount': data['amount'],
-                        'Stock Status': data['stock_status'],
-                        'Timestamp': data['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                
-                reasons_df = pd.DataFrame(reasons_data)
-                csv_reasons = reasons_df.to_csv(index=False)
-                st.download_button(
-                    label="💬 Download Order Reasons (CSV)",
-                    data=csv_reasons,
-                    file_name=f"order_reasons_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.info("💡 No order reasons recorded yet")
+            st.write("")  # Spacing
+        
+        st.markdown("---")
         
         # ============================================================
-        # RECORDED REASONS SUMMARY - PER ORDER
+        # EXPORT ALL ORDER DATA TO EXCEL
         # ============================================================
         
-        if st.session_state.order_reasons_dict:
-            st.markdown("---")
-            st.subheader("✅ Recorded Reasons - By Sales Order")
+        st.subheader("📊 Export All Order Data with Comments")
+        
+        if st.session_state.order_data_dict:
             
-            for order_key, data in st.session_state.order_reasons_dict.items():
+            if st.button("📥 Generate Excel Export"):
+                # Create Excel workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Order Data"
+                
+                # Define styles
+                header_fill = PatternFill(start_color="1F77B4", end_color="1F77B4", fill_type="solid")
+                header_font = Font(bold=True, color="FFFFFF")
+                border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+                
+                # Headers
+                headers = ['Customer', 'Sales Order', 'Item No', 'Description', 'Amount', 
+                          'Stock Status', 'Reason', 'Comments', 'Recorded Date', 'Recorded Time']
+                
+                for col_num, header in enumerate(headers, 1):
+                    cell = ws.cell(row=1, column=col_num)
+                    cell.value = header
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.border = border
+                
+                # Add data rows
+                for row_num, (order_key, data) in enumerate(st.session_state.order_data_dict.items(), 2):
+                    timestamp = data['timestamp']
+                    
+                    ws.cell(row=row_num, column=1).value = data['customer']
+                    ws.cell(row=row_num, column=2).value = data['sales_order']
+                    ws.cell(row=row_num, column=3).value = data['item_no']
+                    ws.cell(row=row_num, column=4).value = data['description']
+                    ws.cell(row=row_num, column=5).value = data['amount']
+                    ws.cell(row=row_num, column=6).value = data['stock_status']
+                    ws.cell(row=row_num, column=7).value = data['reason']
+                    ws.cell(row=row_num, column=8).value = data['comments']
+                    ws.cell(row=row_num, column=9).value = timestamp.strftime("%Y-%m-%d")
+                    ws.cell(row=row_num, column=10).value = timestamp.strftime("%H:%M:%S")
+                    
+                    # Apply borders
+                    for col_num in range(1, len(headers) + 1):
+                        ws.cell(row=row_num, column=col_num).border = border
+                    
+                    # Set column width for comments
+                    ws.column_dimensions['H'].width = 40
+                
+                # Set column widths
+                ws.column_dimensions['A'].width = 25
+                ws.column_dimensions['B'].width = 15
+                ws.column_dimensions['C'].width = 15
+                ws.column_dimensions['D'].width = 35
+                ws.column_dimensions['E'].width = 12
+                ws.column_dimensions['F'].width = 12
+                ws.column_dimensions['G'].width = 25
+                ws.column_dimensions['I'].width = 12
+                ws.column_dimensions['J'].width = 12
+                
+                # Save to bytes
+                excel_file = io.BytesIO()
+                wb.save(excel_file)
+                excel_file.seek(0)
+                
+                # Download button
+                st.download_button(
+                    label="💾 Download as Excel",
+                    data=excel_file,
+                    file_name=f"back_order_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+                st.success("✅ Excel file ready for download!")
+        else:
+            st.info("💡 No order data recorded yet. Add reasons and comments above to export.")
+        
+        st.markdown("---")
+        
+        # ============================================================
+        # RECORDED DATA SUMMARY
+        # ============================================================
+        
+        if st.session_state.order_data_dict:
+            st.subheader("✅ Recorded Data - By Sales Order")
+            
+            for order_key, data in st.session_state.order_data_dict.items():
                 with st.expander(f"📦 {data['sales_order']} - {data['item_no']} | ${data['amount']:,.2f}"):
                     col1, col2 = st.columns(2)
                     
@@ -599,16 +687,19 @@ if st.session_state.df is not None:
                         st.write(f"**Customer:** {data['customer']}")
                         st.write(f"**Description:** {data['description'][:60]}")
                         st.write(f"**Amount:** ${data['amount']:,.2f}")
+                        st.write(f"**Stock Status:** {data['stock_status']}")
                     
                     with col2:
                         st.write(f"**Reason:** {data['reason']}")
-                        st.write(f"**Stock Status:** {data['stock_status']}")
-                        st.write(f"**Item #:** {data['item_no']}")
+                        st.write(f"**Comments:**")
+                        st.write(data['comments'] if data['comments'] else "No comments added")
                     
                     st.caption(f"🕐 Recorded: {data['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
     
     except Exception as e:
         st.error(f"❌ Error processing data: {str(e)}")
+        import traceback
+        st.write(traceback.format_exc())
         st.write("Please ensure your file has the required columns:")
         st.write("- QOH")
         st.write("- Sell-to Customer Name")
@@ -623,8 +714,8 @@ else:
         1. **Upload your file** using the sidebar (Excel or CSV)
         2. **Review your back orders** - organized by customer
         3. **See the split** between in-stock and back order items with dollar values
-        4. **Record reasons** for why items haven't shipped yet (per order)
-        5. **Export reports** for your records
+        4. **Add reason and comments** for each sales order
+        5. **Export all data** to Excel with one click
         
         **Required columns in your file:**
         - QOH (Quantity on Hand)
